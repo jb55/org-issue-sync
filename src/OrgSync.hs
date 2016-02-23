@@ -30,7 +30,7 @@ data RunConfiguration = RunConfiguration
                         { rcScanFiles :: [FilePath]
                         , rcStubFiles :: [FilePath]
                         , rcOutputFile :: FilePath
-                        , rcGitHubOAuth :: Maybe String
+                        , rcGitHubOAuth :: Maybe Text
                         , rcGitHubSources :: [GitHubSource]
                         , rcGoogleCodeSources :: [GoogleCodeSource]
                         , rcGoogleTaskSources :: [GoogleTasksSource]
@@ -47,7 +47,7 @@ data RunOptions = RunOptions
                   , roUpdateIssues :: Bool
                   } deriving (Eq, Show)
 
-commentLn :: Bool -> String -> IO ()
+commentLn :: Bool -> Text -> IO ()
 commentLn verbose s = if verbose
                       then putStrLn s
                       else return ()
@@ -64,12 +64,12 @@ loadOrgIssues file = do
 -- | Print a reasonably-well formatted list of issues, grouped by type
 -- and repo first.  Would be better with pretty-printer support, to
 -- get terminal width, etc.
-printIssues :: Int -> [InputIssue] -> String
+printIssues :: Int -> [InputIssue] -> Text
 printIssues width inpissues =
   let issues = map issueOf inpissues
       byType = aggregateBy iType issues
       byTypeAndRepo = map (\(t, iss) -> (t, aggregateBy origin iss)) byType
-      printIssueList :: String -> [Int] -> String
+      printIssueList :: Text -> [Int] -> Text
       printIssueList orign issuenums =
         let rawString = orign ++ ": " ++ (intercalate ", " $
                                           map show $ sort issuenums)
@@ -82,9 +82,9 @@ printIssues width inpissues =
             wrapped = (indent ++ (head rawWrappedLines)):(
               map (\s -> indent ++ indent ++ s) (tail rawWrappedLines))
         in intercalate "\n" wrapped
-      printIssuesForType :: (String, [(String, [Issue])]) -> String
+      printIssuesForType :: (Text, [(Text, [Issue])]) -> Text
       printIssuesForType (ty, rest) =
-        let printRestElem :: (String, [Issue]) -> String
+        let printRestElem :: (Text, [Issue]) -> Text
             printRestElem (orig, iss) = printIssueList orig $ map number iss
         in ty ++ ":\n" ++ (intercalate "\n" $ map printRestElem rest)
   in intercalate "\n" $ map printIssuesForType byTypeAndRepo
@@ -95,7 +95,7 @@ loadIssueFile path = do
   doc <- catchIOError (loadOrgIssues path) retEmpty
   return $ IssueFile path doc
 
-generateIssueFileText :: IssueFile -> [InputIssue] -> String
+generateIssueFileText :: IssueFile -> [InputIssue] -> Text
 generateIssueFileText _ [] = ""
 generateIssueFileText file issuelist =
   let issueSet = S.fromList $ map issueOf issuelist

@@ -11,8 +11,8 @@ import System.FilePath.Glob
 import qualified Data.ByteString.Lazy as BS (readFile, writeFile)
 import qualified Data.ByteString.Lazy.Char8 as BSC (unpack)
 
-data IssuePath = IssuePath { ipType :: String
-                           , ipOrigin :: String
+data IssuePath = IssuePath { ipType :: Text
+                           , ipOrigin :: Text
                            , ipNumber :: Int
                            } deriving (Eq, Show)
 -- A directory

@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings #-}
 -- TODO(lally): trim down these imports.
 module Data.OrgIssue where
 import Data.OrgMode
@@ -6,12 +6,14 @@ import Data.OrgMode.Text
 import Data.Either (isLeft)
 import Data.Issue
 import Control.Monad
+import Control.Arrow (second)
 import Control.Exception (handle, assert)
 import Data.Char (toUpper, isAlphaNum, isSpace)
 import Data.List
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Maybe (mapMaybe, fromJust, catMaybes, isJust)
+import qualified Data.Text.IO as T
+import Data.Maybe (mapMaybe, fromJust, catMaybes, isJust, fromMaybe)
 import Data.Monoid
 import Debug.Trace (trace)
 import Text.Parsec
@@ -26,11 +28,11 @@ mkLine n = Just n :: LineNumber
 -- https://code.google.com/p/webrtc/issues/detail?id=3592
 makeIssueUrl :: Issue -> Text
 makeIssueUrl issue =
-  let num = show $ number issue
+  let num = T.pack $ show $ number issue
       org = origin issue
-  in if '/' `T.elem` org
-     then "https://www.github.com/" ++ org ++ "/issues/" ++ num
-     else "https://code.google.com/p/" ++ org ++ "/issues/detail?id=" ++ num
+  in if T.any (== '/') org
+     then "https://www.github.com/" <> org <> "/issues/" <> num
+     else "https://code.google.com/p/" <> org <> "/issues/detail?id=" <> num
 
 makeIssueOrgHeading :: LineNumber -> Int -> Issue -> TextLine
 makeIssueOrgHeading fstLine dpth issue =
@@ -52,38 +54,39 @@ kUrl = "URL"
 makeIssueOrgDrawer :: LineNumber -> Int -> Issue -> [TextLine]
 makeIssueOrgDrawer fstLine depth issue =
   let props = [
-        (kIssueNum, show $ number issue),
+        (kIssueNum, T.pack $ show $ number issue),
         (kIssueOrigin, origin issue),
         (kIssueUser, user issue),
         (kIssueType, iType issue),
         (kUrl, iUrl issue)]
-  in makeDrawerLines fstLine depth "PROPERTIES" props
+  in makeDrawerLines fstLine depth "PROPERTIES" (map (second T.unpack) props)
 
 appendLines (Nothing:_) = Nothing
-appendLines (a:b:xs) = appendLines ((lineAdd a b):xs)
-appendLines [(Just a)] = Just a
+appendLines (a:b:xs) = appendLines (lineAdd a b:xs)
+appendLines [Just a] = Just a
 
 makeIssueOrgNode :: LineNumber -> Int -> Issue -> Text
 makeIssueOrgNode fstLine depth issue =
-  let indent = take depth $ repeat ' '
+  let indent = T.replicate depth " "
       heading = makeIssueOrgHeading fstLine depth issue
       drawer = makeIssueOrgDrawer (lineAdd fstLine (mkLine 1)) depth issue
-      url_text = indent ++ "- [[" ++ (iUrl issue) ++ "][Issue Link]]"
-      url = TextLine depth url_text (appendLines [fstLine, mkLine 1, mkLine (length drawer)])
+      url_text = indent <> "- [[" <> iUrl issue <> "][Issue Link]]"
+      url = TextLine depth (T.unpack url_text)
+                           (appendLines [fstLine, mkLine 1, mkLine (length drawer)])
       body = drawer ++ [url] ++ (
         getTextLines $ makeIssueSubNode (depth+1) (
            appendLines [fstLine, mkLine 2, mkLine $ length drawer]) issue)
-      node_text = [tlText $ heading] ++ (map tlText body)
-  in unlines $ node_text
+      node_text = tlText heading : map tlText body
+  in T.unlines (map T.pack node_text)
 
 -- Dumb v0.1: just splat issues at the end of files.
 appendIssues :: FilePath -> [Issue] -> IO ()
 appendIssues file issues = do
-  let headings = intercalate "\n" $ map (makeIssueOrgNode Nothing 2) issues
-  appendFile file headings
+  let headings = T.intercalate "\n" $ map (makeIssueOrgNode Nothing 2) issues
+  T.appendFile file headings
 
 issueStatus :: IssueStatus -> Text
-issueStatus stat = map toUpper $ show stat
+issueStatus stat = T.toUpper (T.pack (show stat))
 
 statusIssue :: Text -> Maybe IssueStatus
 statusIssue s =
@@ -113,21 +116,22 @@ getOrgIssue n =
       hasPropDrawer nd = any (drawerNameIs "PROPERTIES") $ drawersOf nd
       propDrawer nd = head $ filter (drawerNameIs "PROPERTIES") $ drawersOf nd
       hasKey k d = let matched = filter (\(kk,_) -> kk == k) $ drProperties d
-                   in length matched > 0
+                   in not (null matched)
       valOf k d = let matched = filter (\(kk,_) -> kk == k) $ drProperties d
                   in head $ map snd matched
       mapStatus Nothing = Open
-      mapStatus (Just (Prefix s)) = case (statusIssue s) of
-        Just st -> st
-        Nothing -> Open
+      mapStatus (Just (Prefix s)) = fromMaybe Open (statusIssue (T.pack s))
       url = if hasKey kUrl draw
             then valOf kUrl draw
             else ""
-  in if (hasPropDrawer n && hasOrigin && hasNum && hasUser && hasType)
-     then Just $ Issue (valOf kIssueOrigin draw) (
-       read $ valOf kIssueNum draw) (
-       valOf kIssueUser draw) (mapStatus $ nPrefix n) (nTags n) (nTopic n) (
-       valOf kIssueType draw) url []
+  in if hasPropDrawer n && hasOrigin && hasNum && hasUser && hasType
+     then Just $ Issue (valOf kIssueOrigin draw)
+                       (read $ valOf kIssueNum draw)
+                       (valOf kIssueUser draw)
+                       (mapStatus $ nPrefix n)
+                       (nTags n)
+                       (nTopic n)
+                       (valOf kIssueType draw) url []
      else Nothing
 
 makeIssueLine :: Int -> LineNumber -> IssueEvent -> [NodeChild]
