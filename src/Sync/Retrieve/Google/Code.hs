@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Sync.Retrieve.Google.Code where
 
 import qualified Data.Csv as CSV
@@ -6,9 +8,11 @@ import Data.Char (toLower, isSpace, ord, isAlphaNum)
 import Data.Vector (Vector, toList)
 import Data.ByteString.Lazy.Char8 (pack)
 import Data.List (intercalate)
+import Data.Maybe (fromMaybe)
 import Data.List.Split (splitOn)
 import Data.Text.Encoding
 import qualified Data.Map as M
+import qualified Data.Text as T
 import Data.Issue
 import Network.HTTP
 import Network.URI (escapeURIString, isUnescapedInURI)
@@ -32,13 +36,13 @@ fetchDetails :: String -> Int -> IO [IssueEvent]
 fetchDetails repo issueNum = do
   let openURL x = getResponseBody =<< simpleHTTP (getRequest x)
       url = ("http://code.google.com/p/" ++ repo ++ "/issues/detail?id=" ++
-             (show issueNum) ++ "&can=3&colspec=ID%20Pri%20Mstone%20" ++
+             show issueNum ++ "&can=3&colspec=ID%20Pri%20Mstone%20" ++
              "ReleaseBlock%20Area%20Status%20Owner%20Summary")
   text <- openURL url
-  return $ parseIssueText text
+  return $ parseIssueText (T.pack text)
 
 -- | Takes a project and a list of tags, returns [Issue]
-fetch :: String -> [String] -> IO ([Issue])
+fetch :: String -> [String] -> IO [Issue]
 fetch project tags = do
    let esctags = map (escapeURIString isUnescapedInURI) tags
        query = intercalate "%20" esctags
@@ -52,19 +56,20 @@ fetch project tags = do
        lookup stat = M.lookup stat (M.fromList [
                                        ("assigned", Open), ("closed", Closed),
                                        ("open", Open)])
-       xlate stat = maybe Open id $ lookup stat
+       xlate stat = fromMaybe Open (lookup stat)
        cleanChar c
         | isAlphaNum c = c
         | otherwise = '_'
-       cleanTag tag = map cleanChar tag
+       cleanTag = map cleanChar
        makeIssue :: CSVRow -> Issue
-       makeIssue (id, prio, mstone, relblock, area, status, owner,
-                  summary, labels) =
+       makeIssue (id, prio, mstone, relblock, area, status, owner, summary, labels) =
          let url = "https://code.google.com/p/" ++ project ++
                    "/issues/detail?id=" ++ (show id)
-         in (Issue project id owner (xlate $ map toLower status) (
-                map cleanTag $ map trim $ splitOn "," labels)
-             summary "googlecode" url [])
+         in (Issue (T.pack project) id
+                   (T.pack owner)
+                   (xlate $ map toLower status)
+                   (map (T.pack . cleanTag . trim) (splitOn "," labels))
+                   (T.pack summary) "googlecode" (T.pack url) [])
    issues <- case res of
          Left err -> do putStrLn $ "Failed parse from '" ++ uri ++ "': " ++ err
                         return []
@@ -72,6 +77,6 @@ fetch project tags = do
                           return $ map makeIssue issues
    let lookupIssue :: Issue -> IO Issue
        lookupIssue iss = do
-         details <- fetchDetails (origin iss) (number iss)
+         details <- fetchDetails (T.unpack $ origin iss) (number iss)
          return $ iss { events = details }
    mapM lookupIssue issues

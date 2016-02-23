@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Sync.Retrieve.Google.Code.Parse (parseIssueText) where
 
 import Data.OrgMode.Text
@@ -7,9 +9,11 @@ import Debug.Trace
 import Data.Maybe
 import Data.Issue
 import Data.Time.Calendar
+import Data.Text (Text)
 import Data.Time.Clock
 import Data.Time.Locale.Compat
 import qualified Data.Time.Format as TF
+import qualified Data.Text as T
 
 data DepthTaggedTag str = DepthTaggedTag Int (Tag str) deriving (Eq)
 
@@ -21,7 +25,7 @@ instance (Show str) => Show (DepthTaggedTag str) where
 -- tags.  Unsurprising, but we must repair it.  So, if we maintain a
 -- stack: [div div div b] and see a /div, we should pop the stack
 -- backwards until we see the matching tag.
-matchDepth :: [Tag String] -> [Tag String] -> ([DepthTaggedTag String], [Tag String])
+matchDepth :: [Tag Text] -> [Tag Text] -> ([DepthTaggedTag Text], [Tag Text])
 matchDepth [] remain = ([], remain)
 matchDepth stack [] = ([], [])
 matchDepth stack (t:ts) =
@@ -47,7 +51,7 @@ matchDepth stack (t:ts) =
 
 -- | Return the open/close pair of tags (and include all the ones in
 -- between) that match the pattern.
-matchExternalTag :: (TagRep t) => t -> [Tag String] -> ([Tag String], [Tag String])
+matchExternalTag :: (TagRep t) => t -> [Tag Text] -> ([Tag Text], [Tag Text])
 matchExternalTag pattern input =
   let startOfStream = dropWhile (~/= pattern) input
       (found, rem) = matchDepth [head startOfStream] (tail startOfStream)
@@ -56,70 +60,61 @@ matchExternalTag pattern input =
      then ((head startOfStream):(map stripDepth found), rem)
      else ([], [])
 
-extractHistoryTags :: [Tag String] -> [Tag String]
+extractHistoryTags :: [Tag Text] -> [Tag Text]
 extractHistoryTags tags =
-  fst $ matchExternalTag "<td class=\"vt issuedescription\"" tags
+  fst $ matchExternalTag ("<td class=\"vt issuedescription\"" :: String) tags
 
 takeMatchingChildren pat [] = []
 takeMatchingChildren pat tgs =
   let (chld, dropped) = matchExternalTag pat tgs
   in chld:(takeMatchingChildren pat dropped)
 
-takeDivChildren tgs = takeMatchingChildren "<div" tgs
+takeDivChildren :: [Tag Text] -> [[Tag Text]]
+takeDivChildren tgs = takeMatchingChildren ("<div" :: String) tgs
 
 -- | Takes output from extractHistoryTags and separates them out into individual groups of tags
 separateChildrenDivs tags =
   filter (\l -> length l > 0) $ takeDivChildren tags
 
-trim xs =
-  let rstrip xs = reverse $ lstrip $ reverse xs
-      lstrip = dropWhile isWhiteSpace
-      isWhiteSpace c
-        | c == ' ' = True
-        | c == '\r' = True
-        | c == '\n' = True
-        | otherwise = False
-  in lstrip $ rstrip xs
-
-
+parseIssueDescription :: [Tag Text] -> (Text, Text)
 parseIssueDescription tags =
-  let user = innerText $ take 3 $ dropWhile (~/= "<a class=userlink") $ tags
-      desc = innerText $ take 3 $ dropWhile (~/= "<pre") $ tags
-  in (user, trim desc)
+  let user = innerText $ take 3 $ dropWhile (~/= ("<a class=userlink" :: String)) $ tags
+      desc = innerText $ take 3 $ dropWhile (~/= ("<pre" :: String)) $ tags
+  in (user, T.strip desc)
 
-scanStatusChange :: UTCTime -> String -> String -> IssueEvent
+scanStatusChange :: UTCTime -> Text -> Text -> IssueEvent
 scanStatusChange when user value =
-  let newStat = case trim value of
+  let newStat = case T.strip value of
         "Started" -> Active
         "Fixed" -> Closed
         otherwise -> Open
       statChange = IssueStatusChange newStat
   in IssueEvent when user statChange
 
-scanOwnerChange :: UTCTime -> String -> String -> IssueEvent
+scanOwnerChange :: UTCTime -> Text -> Text -> IssueEvent
 scanOwnerChange when user value =
-  let statChange = IssueOwnerChange $ trim value
+  let statChange = IssueOwnerChange (T.strip value)
   in IssueEvent when user statChange
 
-scanLabelChange :: UTCTime -> String -> String -> IssueEvent
+scanLabelChange :: UTCTime -> Text -> Text -> IssueEvent
 scanLabelChange when user value =
-  let unsub :: String -> Bool
-      unsub s = head s == '-'
-      newLabels = filter (\x -> not . unsub $ x) $ words value
-      oldLabels = map tail $ filter unsub $ words value
+  let unsub :: Text -> Bool
+      unsub s = T.head s == '-'
+      newLabels = filter (\x -> not . unsub $ x) $ T.words value
+      oldLabels = map T.tail $ filter unsub $ T.words value
       labelChange = IssueLabelChange newLabels oldLabels
   in IssueEvent when user labelChange
 
-scanUpdateBox :: UTCTime -> String -> [Tag String] -> [Maybe IssueEvent]
+scanUpdateBox :: UTCTime -> Text -> [Tag Text] -> [Maybe IssueEvent]
 scanUpdateBox when user [] = []
 scanUpdateBox when user tags =
   let stat_update_text = "Status:"
       owner_update_text = "Owner:"
       label_update_text = "Labels:"
-      (h, t) = matchExternalTag "<b" tags
-      key = trim $ innerText h
-      value = trim $ innerText $ takeWhile (~/= "<br") t
-      rest = dropWhile (~/= "<br") t
+      (h, t) = matchExternalTag ("<b" :: String) tags
+      key = T.strip $ innerText h
+      value = T.strip $ innerText $ takeWhile (~/= ("<br" :: String)) t
+      rest = dropWhile (~/= ("<br" :: String)) t
       recognized_update =
         if key == stat_update_text
         then Just $ scanStatusChange when user value -- ("STAT_UPDATE", value)
@@ -133,21 +128,23 @@ scanUpdateBox when user tags =
 -- | Classify the update and put out any relevant IssueUpdates from it.
 parseIssueUpdate tags =
   let no_comment = "(No comment was entered for this change.)"
-      date_text = trim . innerText . fst . matchExternalTag "<span class=date" $ tags
-      parsed_date = TF.parseTime defaultTimeLocale "%b %e, %Y" date_text
+      date_text = T.strip . innerText . fst . matchExternalTag ("<span class=date" :: String) $ tags
+      parsed_date = TF.parseTime defaultTimeLocale "%b %e, %Y" (T.unpack date_text)
       when = maybe (UTCTime (ModifiedJulianDay 0) 0) id parsed_date
-      user = innerText $ take 3 $ dropWhile (~/= "<a class=userlink") $ tags
+      user = innerText $ take 3 $ dropWhile (~/= ("<a class=userlink" :: String)) $ tags
+      comment :: Text
       comment =
-        normalizeInputText $ trim $ innerText $ take 4 $ dropWhile (~/= "<pre") tags
+        T.pack $ normalizeInputText $ T.unpack $ T.strip
+             $ innerText $ take 4 $ dropWhile (~/= ("<pre" :: String)) tags
       has_no_comment = no_comment == comment
       comment_result = if has_no_comment
                        then Nothing
                        else Just $ IssueEvent when user $ IssueComment comment
-      update_box = fst $ matchExternalTag "<div class=box-inner" tags
+      update_box = fst $ matchExternalTag ("<div class=box-inner" :: String) tags
       updates = scanUpdateBox when user update_box
   in catMaybes (comment_result:(updates))
 
-parseIssueText :: String -> [IssueEvent]
+parseIssueText :: Text -> [IssueEvent]
 parseIssueText text =
   let hist = extractHistoryTags $ parseTags text
       cl = separateChildrenDivs hist

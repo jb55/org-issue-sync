@@ -15,7 +15,9 @@ import Network.HTTP.Conduit
 import Network.HTTP.Types (hAuthorization)
 import Text.Regex.Posix
 import Data.Time.Locale.Compat
+import Data.Text (Text)
 
+import qualified Data.Aeson as A
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy.Char8 as L8
 import qualified Data.HashMap.Strict as HM
@@ -31,30 +33,30 @@ data RFCTime = RFCTime CLK.UTCTime deriving (Eq, Show)
 getTime (RFCTime t) = t
 
 data Task = Task
-            { tId :: String
-            , tTitle :: String
-            , tPosition :: String
+            { tId :: Text
+            , tTitle :: Text
+            , tPosition :: Text
             , tUpdated :: RFCTime
-            , tNotes :: Maybe String
+            , tNotes :: Maybe Text
             , tStatus :: IssueStatus
             , tCompleted :: Maybe RFCTime
             , tDue :: Maybe RFCTime
-            , tUrl :: String
+            , tUrl :: Text
             } deriving (Eq, Show)
 
 data Tasks = Tasks { tsTasks :: [Task] } deriving (Eq, Show)
 
 
 data TaskList = TaskList
-              { tlId :: String
-              , tlTitle :: String
+              { tlId :: Text
+              , tlTitle :: Text
               , tlUpdated :: RFCTime
               } deriving (Eq, Show)
 
 data TaskListList = TaskListList [TaskList] deriving (Eq, Show)
 
-data TaggedPattern = TaggedPattern String [String] deriving (Eq, Show)
-data TaggedList = TaggedList TaskList [String] deriving (Eq, Show)
+data TaggedPattern = TaggedPattern Text [Text] deriving (Eq, Show)
+data TaggedList = TaggedList TaskList [Text] deriving (Eq, Show)
 
 tlList (TaggedList t _) = t
 tlTags (TaggedList _ ts) = ts
@@ -65,20 +67,20 @@ fromRfc3399 str =
   let formats = ["%FT%TZ", "%FT%T%z", "%FT%T%Q%z", "%FT%T%QZ"]
       tryParse fmt = TF.parseTime defaultTimeLocale fmt $ T.unpack str
       parse_successes = filter isJust $ map tryParse formats
-  in if length parse_successes > 0
+  in if not (null parse_successes)
      then RFCTime $ LT.zonedTimeToUTC $ fromJust $ head parse_successes
-     else trace ("Failed parse of " ++ (T.unpack str)) $ RFCTime $ CP.posixSecondsToUTCTime (fromIntegral 0)
+     else trace ("Failed parse of " ++ T.unpack str) $ RFCTime $ CP.posixSecondsToUTCTime 0
 
 instance FromJSON IssueStatus where
-  parseJSON (String s) =
+  parseJSON (A.String s) =
     case s of
       "needsAction" -> return Open
       "completed" -> return Closed
-      otherwise -> trace ("Failed parsing issue status.") $ mzero
+      otherwise -> trace "Failed parsing issue status." mzero
   parseJSON _ = mzero
 
 instance FromJSON RFCTime where
-  parseJSON (String s) = return $ fromRfc3399 s
+  parseJSON (A.String s) = return (fromRfc3399 s)
   parseJSON _ = mzero
 
 instance FromJSON Task where
@@ -115,7 +117,7 @@ instance FromJSON Tasks where
         list = V.toList vec
     args <- mapM parseJSON list
     return $ Tasks args
-  parseJSON _ = trace ("FromJSON Tasks: not an object.") $ mzero
+  parseJSON _ = trace "FromJSON Tasks: not an object." mzero
 
 setupToken :: Maybe FilePath -> OAuth2Client -> IO OAuth2Token
 setupToken tokenpath client = do
@@ -129,8 +131,8 @@ authorize token request = request
 -- | Returns lists for the given user and list-regexs.
 getLists :: Maybe FilePath ->
             OAuth2Client ->
-            [(TaskList -> Maybe [String])] ->
-            IO ([TaggedList])
+            [TaskList -> Maybe [Text]] ->
+            IO [TaggedList]
 getLists tokenpath client matchers = do
   let applyMatchers :: TaskList -> Maybe TaggedList
       applyMatchers list =
@@ -138,7 +140,7 @@ getLists tokenpath client matchers = do
               tags <- m l
               return $ TaggedList l tags
             applications = mapMaybe (applyMatcher list) matchers
-        in if length applications > 0
+        in if not (null applications)
            then Just $ TaggedList list $ concatMap tlTags applications
            else Nothing
   token <- setupToken tokenpath client
@@ -163,7 +165,7 @@ getLists tokenpath client matchers = do
 
 issue_user = "google-tasks"
 
-convertTask :: String -> Task -> Issue
+convertTask :: Text -> Task -> Issue
 convertTask u t =
   let completionEvent = IssueEvent <$> (fmap getTime $ tCompleted t)
                         <*> (pure issue_user)
@@ -175,12 +177,12 @@ convertTask u t =
       events = catMaybes [notesEvent, completionEvent]
   in Issue u (abs $ hash $ tId t) u (tStatus t) [] (tTitle t) "google-tasks" (tUrl t) events
 
-getList :: Maybe FilePath -> OAuth2Client -> String -> String -> IO ([Issue])
+getList :: Maybe FilePath -> OAuth2Client -> Text -> Text -> IO [Issue]
 getList tokenpath client user listid = do
   token <- setupToken tokenpath client
   request <-
-    parseUrl ("https://www.googleapis.com/tasks/v1/lists/" ++ listid ++
-              "/tasks")
+    parseUrl ("https://www.googleapis.com/tasks/v1/lists/" ++ T.unpack listid
+                                                           ++ "/tasks")
   response <- withManager $ httpLbs $ authorize token request
   let body = responseBody response
   let list = decode body :: Maybe Tasks

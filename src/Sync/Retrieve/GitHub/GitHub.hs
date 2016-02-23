@@ -1,178 +1,210 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+
 module Sync.Retrieve.GitHub.GitHub where
 import Control.Exception
 import Data.Issue
 import Data.Maybe
+import Data.Text (Text)
+import Data.ByteString (ByteString)
 import Data.Char
+import Data.Proxy (Proxy(..))
 import Data.List (sort)
+import Data.Monoid ((<>))
 import Debug.Trace
 import Network.HTTP.Conduit (HttpException(..))
 import Network.HTTP.Types (statusCode, statusMessage)
-import qualified Github.Auth as GA
-import qualified Github.Issues as GI
-import qualified Github.Issues.Events as GIE
-import qualified Github.Issues.Comments as GIC
-import qualified Github.Data.Definitions as GD
+import qualified Data.Text as T
+import qualified Data.Text.IO as T
+import qualified Data.Vector as V
+import qualified GitHub.Auth as GH
+import qualified GitHub.Data.Issues as GH
+import qualified GitHub.Data.Id as GH
+import qualified GitHub.Data.Name as GH
+import qualified GitHub.Endpoints.Issues as GH
+import qualified GitHub.Endpoints.Issues.Events as GH
+import qualified GitHub.Endpoints.Issues.Comments as GH
+import qualified GitHub.Data.Definitions as GH
 
 rstrip xs = reverse $ lstrip $ reverse xs
 lstrip = dropWhile (== ' ')
 strip xs = lstrip $ rstrip xs
 
-convertIssue :: String -> GD.Issue -> Issue
+convertIssue :: Text -> GH.Issue -> Issue
 convertIssue origin iss =
-  let user = case GD.issueAssignee iss of
-        Nothing -> GD.issueUser iss
-        Just us -> us
-      userName = GD.githubOwnerLogin user
-      tags = map GD.labelName $ GD.issueLabels iss
-      isClosed = isJust $ GD.issueClosedAt iss
-      isActive = any (== "T:Active") tags
-      status = if isClosed
-               then Closed
-               else if isActive
-                    then Active
-                    else Open
+  let user = fromMaybe (GH.issueUser iss) (GH.issueAssignee iss)
+      userName = GH.simpleUserLogin user
+      tags = fmap GH.labelName (GH.issueLabels iss)
+      isClosed = isJust $ GH.issueClosedAt iss
+      isActive = elem "T:Active" tags
+      status
+        | isClosed  = Closed
+        | isActive  = Active
+        | otherwise = Open
       cleanChar c
         | isAlphaNum c = c
         | otherwise = '_'
-      cleanTag tag = map cleanChar tag
-      cleanTags = map cleanTag tags
-      nr = GD.issueNumber iss
-      url = "https://www.github.com/" ++ origin ++ "/issues/" ++
-            (show nr)
-  in (Issue origin nr userName status cleanTags
-      (strip $ GD.issueTitle iss) "github" url [])
+      cleanTag = T.map cleanChar
+      cleanTags = V.toList (fmap cleanTag tags)
+      nr = GH.issueNumber iss
+      url = "https://www.github.com/" <> origin <> "/issues/" <> T.pack (show nr)
+  in Issue origin nr (simpleName user) status cleanTags
+      (T.strip $ GH.issueTitle iss) "github" url []
 
-wrapEvent :: GD.Event -> IssueEventDetails -> IssueEvent
-wrapEvent event details =
-  IssueEvent (GD.fromGithubDate $ GD.eventCreatedAt event) (
-                    GD.githubOwnerLogin $ GD.eventActor event) details
+simpleName :: GH.SimpleUser -> Text
+simpleName = GH.untagName . GH.simpleUserLogin
 
-convertEvent :: GD.Event -> IssueEventDetails
-convertEvent evt = IssueComment (show evt)
+wrapEvent :: GH.Event -> IssueEventDetails -> IssueEvent
+wrapEvent event =
+  IssueEvent (GH.eventCreatedAt event)
+             (simpleName $ GH.eventActor event)
 
-convertIssueEvent :: GD.Event -> [IssueEvent]
+convertEvent :: GH.Event -> IssueEventDetails
+convertEvent = IssueComment . T.pack . show . GH.eventType
+
+convertIssueEvent :: GH.Event -> [IssueEvent]
 convertIssueEvent event
 -- status change
-  | (GD.eventType event) == GD.Assigned = [
-    wrapEvent event $ IssueOwnerChange (
-       GD.githubOwnerLogin $ GD.eventActor event)]
-  | (GD.eventType event) == GD.Closed = [
+  | GH.eventType event == GH.Assigned = [
+    wrapEvent event $ IssueOwnerChange (simpleName (GH.eventActor event))]
+  | GH.eventType event == GH.Closed = [
     wrapEvent event $ IssueStatusChange Closed]
-  | (GD.eventType event) == GD.ActorUnassigned = [
+  | GH.eventType event == GH.ActorUnassigned = [
     wrapEvent event $ IssueComment "Unassigned owner"]
-  | (GD.eventType event) == GD.Reopened = [
+  | GH.eventType event == GH.Reopened = [
     wrapEvent event $ IssueStatusChange Open]
-  | (GD.eventType event) == GD.Renamed = [
-    wrapEvent event $ IssueComment ("Changed title")]
--- label change 
-  | (GD.eventType event) == GD.Labeled = [
-    wrapEvent event $ IssueComment ("Added a label")]
-  | (GD.eventType event) == GD.Unlabeled = [
-    wrapEvent event $ IssueComment ("Removed a label")]
--- milestone change 
-  | (GD.eventType event) == GD.Milestoned =
+  | GH.eventType event == GH.Renamed = [
+    wrapEvent event $ IssueComment "Changed title"]
+-- label change
+  | GH.eventType event == GH.Labeled = [
+    wrapEvent event $ IssueComment "Added a label"]
+  | GH.eventType event == GH.Unlabeled = [
+    wrapEvent event $ IssueComment "Removed a label"]
+-- milestone change
+  | GH.eventType event == GH.Milestoned =
     let mstone =
-          case GD.eventIssue event of
+          case GH.eventIssue event of
             Just evt ->
-              case GD.issueMilestone evt of
-                Just ms -> " " ++ GD.milestoneTitle ms
+              case GH.issueMilestone evt of
+                Just ms -> ' ' `T.cons` GH.milestoneTitle ms
                 Nothing -> ""
             Nothing -> ""
-    in [wrapEvent event $ (IssueComment ("Added milestone" ++ mstone))]
+    in [wrapEvent event $ IssueComment ("Added milestone" <> mstone)]
 
-  | (GD.eventType event) == GD.Demilestoned = [
+  | GH.eventType event == GH.Demilestoned = [
     wrapEvent event $ IssueComment "Removed a milestone"]
-  | (GD.eventType event) == GD.Subscribed = [
+  | GH.eventType event == GH.Subscribed = [
     wrapEvent event $ IssueComment "Subscribed"]
-  | (GD.eventType event) == GD.Mentioned = [
+  | GH.eventType event == GH.Mentioned = [
     wrapEvent event $ IssueComment "Mentioned"]
 -- ignored, make into comment
-  | otherwise = [wrapEvent event $ (IssueComment (show $ GD.eventType event))]
+  | otherwise = [wrapEvent event $ IssueComment (T.pack $ show $ GH.eventType event)]
 
-convertIssueComment :: GD.IssueComment -> [IssueEvent]
+convertIssueComment :: GH.IssueComment -> [IssueEvent]
 convertIssueComment comment =
-  [IssueEvent (GD.fromGithubDate $ GD.issueCommentCreatedAt comment) (
-      GD.githubOwnerLogin $ GD.issueCommentUser comment) (
-      IssueComment (GD.issueCommentBody comment))]
+  [IssueEvent (GH.issueCommentCreatedAt comment) (
+      GH.untagName $ GH.simpleUserLogin $ GH.issueCommentUser comment) (
+      IssueComment (GH.issueCommentBody comment))]
 
-loadIssueComments :: Maybe GA.GithubAuth -> String -> String -> Int -> IO [IssueEvent]
-loadIssueComments oauth user repo num = do
-  res <- GIC.comments' oauth user repo num
+loadIssueComments :: Maybe GH.Auth
+                  -> GH.Name GH.Owner
+                  -> GH.Name GH.Repo
+                  -> GH.Id GH.Issue
+                  -> IO [IssueEvent]
+loadIssueComments oauth usr repo num = do
+  res <- GH.comments' oauth usr repo num
   case res of
     Left err -> do
-      putStrLn (user ++ "/" ++ repo ++ ": issue " ++ (
-                   show num) ++ ": " ++ show err)
+      T.putStrLn (ownerRepo usr repo <> ": issue " <>
+                   T.pack (show num) <> ": " <> T.pack (show err))
       return []
     Right comments ->
       return $ concatMap convertIssueComment comments
 
-loadIssueEvents :: Maybe GA.GithubAuth -> String -> String -> Int -> IO [IssueEvent]
+loadIssueEvents :: Maybe GH.Auth
+                -> GH.Name GH.Owner
+                -> GH.Name GH.Repo
+                -> GH.Id GH.Issue
+                -> IO [IssueEvent]
 loadIssueEvents oauth user repo issnum = do
-  let classifyError (GD.HTTPConnectionError ex) =
-        case (fromException ex) of
-          Just (StatusCodeException st _ _) -> "HTTP Connection Error " ++
-                                               show (statusCode st) ++ ": " ++
-                                               show (statusMessage st)
-          _ -> "HTTP Connection Error (unknown status code): " ++ show ex
-      classifyError err = show err
-  res <- GIE.eventsForIssue' oauth user repo issnum
+  let classifyError (GH.HTTPError ex) =
+        case ex of
+          StatusCodeException st _ _ -> "HTTP Connection Error "
+                                       <> T.pack (show (statusCode st))
+                                       <> ": "
+                                       <> T.pack (show (statusMessage st))
+          _ -> "HTTP Connection Error (unknown status code): "
+            <> T.pack (show ex)
+      classifyError err = T.pack (show err)
+  res <- GH.eventsForIssue' oauth user repo issnum
   case res of
     Left err -> do
-      putStrLn (user ++ "/" ++ repo ++ ": issue " ++ (
-                   show issnum) ++ ": " ++ classifyError err)
+      T.putStrLn (ownerRepo user repo <> ": issue " <>
+                   T.pack (show issnum) <> ": " <> classifyError err)
       return []
     Right events ->
       return $ concatMap convertIssueEvent events
 
-makeIssueComment :: GD.Issue -> IssueEvent
+makeIssueComment :: GH.Issue -> IssueEvent
 makeIssueComment issue =
-  let user = case GD.issueAssignee issue of
-        Nothing -> GD.issueUser issue
-        Just us -> us
-      userName = GD.githubOwnerLogin user
-      createDate = GD.fromGithubDate $ GD.issueCreatedAt issue
-  in IssueEvent createDate userName (IssueComment (maybe "" id (GD.issueBody issue)))
+  let user = fromMaybe (GH.issueUser issue) (GH.issueAssignee issue)
+      userName = GH.simpleUserLogin user
+      createDate = GH.issueCreatedAt issue
+  in IssueEvent createDate (GH.untagName userName)
+         (IssueComment (fromMaybe "" (GH.issueBody issue)))
 
-fetchIssue :: Maybe String -> String -> String -> Int -> IO (Maybe Issue)
-fetchIssue tok user repo issuenum = do
-  let auth = fmap GA.GithubOAuth tok
-  res <- GI.issue' auth user repo issuenum
+fetchIssue :: Maybe ByteString
+           -> GH.Name GH.Owner
+           -> GH.Name GH.Repo
+           -> GH.Id GH.Issue
+           -> IO (Maybe Issue)
+fetchIssue tok ghuser@(GH.N user) ghrepo@(GH.N repo) issuenum = do
+  let auth = fmap GH.OAuth tok
+  res <- GH.issue' auth ghuser ghrepo issuenum
   case res of
-    Left err -> do putStrLn $ show err; return Nothing
-    Right issue -> return $ Just $ convertIssue (user ++ "/" ++ repo ) issue
+    Left err -> do print err; return Nothing
+    Right issue -> return $ Just $ convertIssue (user <> "/" <> repo ) issue
 
 
-fetchDetails :: Maybe String -> String -> String -> Issue -> IO (Issue)
+fetchDetails :: Maybe ByteString
+             -> GH.Name GH.Owner
+             -> GH.Name GH.Repo
+             -> Issue
+             -> IO Issue
 fetchDetails tok user repo issue = do
-  let auth = fmap GA.GithubOAuth tok
-      issuenum = number issue
+  let auth = fmap GH.OAuth tok
+      issuenum = GH.mkId (Proxy :: Proxy GH.Issue) (number issue)
   eventList <- loadIssueEvents auth user repo issuenum
   commentList <- loadIssueComments auth user repo issuenum
   -- assume that the issue already has the initial comment.
-  return $ issue { events = (events issue) ++ (sort eventList ++ commentList) }
+  return $ issue { events = events issue ++ (sort eventList ++ commentList) }
 
-fetch :: Maybe String -> String -> String -> Maybe IssueStatus -> [String] -> IO [Issue]
-fetch tok user repo stat tags = do
-  let auth = fmap GA.GithubOAuth tok
+ownerRepo :: GH.Name GH.Owner -> GH.Name GH.Repo -> Text
+ownerRepo (GH.N user) (GH.N repo) = user <> "/" <> repo
+
+fetch :: Maybe ByteString
+      -> GH.Name GH.Owner
+      -> GH.Name GH.Repo
+      -> Maybe IssueStatus
+      -> [String]
+      -> IO [Issue]
+fetch tok ghuser@(GH.N user) ghrepo@(GH.N repo) stat tags = do
+  let auth = fmap GH.OAuth tok
       statusLim = case stat of
-        Just Open -> [GI.Open]
-        Just Closed -> [GI.OnlyClosed]
+        Just Open -> [GH.Open]
+        Just Closed -> [GH.OnlyClosed]
         _ -> []
-      tagLim = if length tags > 0
-               then [GI.Labels tags]
-               else []
-  res <- GI.issuesForRepo' auth user repo (statusLim++tagLim)
+      tagLim = [GH.Labels tags | not (null tags)]
+  res <- GH.issuesForRepo' auth ghuser ghrepo (statusLim++tagLim)
   case res of
     Left err -> do
-      putStrLn $ show err
+      print err
       return []
     Right issues -> do
---      eventList <- mapM (\is -> loadIssueEvents auth user repo $ GD.issueNumber is) issues
+--      eventList <- mapM (\is -> loadIssueEvents auth user repo $ GH.issueNumber is) issues
 --      commentList <-
---        mapM (\i -> loadIssueComments auth user repo (GD.issueNumber i)) issues
-      let convertedIssues = map (convertIssue (user++"/"++repo)) issues
-          comments = map makeIssueComment issues
-          conversions = zip convertedIssues comments
-      return $
-        map (\(i,comm) -> i { events = [comm] }) conversions
+--        mapM (\i -> loadIssueComments auth user repo (GH.issueNumber i)) issues
+      let convertedIssues = fmap (convertIssue (ownerRepo ghuser ghrepo)) issues
+          comments = fmap makeIssueComment issues
+          conversions = V.zip convertedIssues comments
+      return $ V.toList $ fmap (\(i,comm) -> i { events = [comm] }) conversions

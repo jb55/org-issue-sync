@@ -1,45 +1,46 @@
 {-# LANGUAGE BangPatterns, OverloadedStrings #-}
 module Data.Issue where
-import Data.Maybe (mapMaybe)
-import Data.Ord
+import Data.Ord ()
 import Data.Hashable
 import Data.Bits
 import Data.Time
+import Data.Text (Text)
 
 data IssueStatus = Open | Active | Closed deriving (Eq, Show)
 
 data IssueEventDetails = IssueStatusChange { isNewStatus :: IssueStatus }
-                       | IssueComment { icComment :: String }
-                       | IssueOwnerChange { ieNewOwner :: String }
-                       | IssueLabelChange { ilNewLabels :: [String],
-                                            ilRemovedLabels :: [String] }
-                       | IssueMilestoneChange { imNewMileStone :: Maybe String,
-                                                imOldMileStone :: Maybe String }
+                       | IssueComment { icComment :: Text }
+                       | IssueOwnerChange { ieNewOwner :: Text }
+                       | IssueLabelChange { ilNewLabels :: [Text],
+                                            ilRemovedLabels :: [Text] }
+                       | IssueMilestoneChange { imNewMileStone :: Maybe Text,
+                                                imOldMileStone :: Maybe Text }
                        deriving (Eq, Show)
 
 data IssueEvent = IssueEvent
                   { ieWhen :: UTCTime
-                  , ieUser :: String
+                  , ieUser :: Text
                   , ieDetails :: IssueEventDetails
                   } deriving (Eq, Show)
 
 data Issue = Issue
-             { origin :: String
+             { origin :: Text
              , number :: Int
-             , user :: String
+             , user :: Text
              , status :: IssueStatus
-             , tags :: [String]
-             , summary :: String
-             , iType :: String
-             , iUrl :: String
+             , tags :: [Text]
+             , summary :: Text
+             , iType :: Text
+             , iUrl :: Text
              , events :: [IssueEvent]
              } deriving (Show)
 
+issueEqual :: Issue -> Issue -> Bool
 issueEqual l r =
   (origin l == origin r) && (number l == number r) && (iType l == iType r)
 
 instance Eq Issue where
-  (==) l r = issueEqual l r
+  (==) = issueEqual
 
 -- |Try to make this as fast as we can.
 instance Ord Issue where

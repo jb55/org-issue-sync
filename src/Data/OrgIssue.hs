@@ -9,6 +9,8 @@ import Control.Monad
 import Control.Exception (handle, assert)
 import Data.Char (toUpper, isAlphaNum, isSpace)
 import Data.List
+import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Maybe (mapMaybe, fromJust, catMaybes, isJust)
 import Data.Monoid
 import Debug.Trace (trace)
@@ -16,30 +18,30 @@ import Text.Parsec
 import Text.Regex.Posix
 
 mkLine :: Int -> LineNumber
-mkLine n = (Just n) :: LineNumber
+mkLine n = Just n :: LineNumber
 
 -- * Issue <-> Org Mapping
 
 -- https://github.com/freedomjs/freedom-pgp-e2e/issues/6
 -- https://code.google.com/p/webrtc/issues/detail?id=3592
-makeIssueUrl :: Issue -> String
+makeIssueUrl :: Issue -> Text
 makeIssueUrl issue =
   let num = show $ number issue
       org = origin issue
-  in if '/' `elem` org
+  in if '/' `T.elem` org
      then "https://www.github.com/" ++ org ++ "/issues/" ++ num
      else "https://code.google.com/p/" ++ org ++ "/issues/detail?id=" ++ num
 
 makeIssueOrgHeading :: LineNumber -> Int -> Issue -> TextLine
 makeIssueOrgHeading fstLine dpth issue =
   let depth = if dpth < 1 then 16 else dpth
-      prefix = take depth $ repeat '*'
-      todo = map toUpper $ show $ status issue
+      prefix = T.replicate depth "*"
+      todo = T.toUpper $ T.pack $ show $ status issue
       summ = summary issue
-      tgs = if length (tags issue) > 0
-            then " :" ++ (intercalate ":" $ tags issue) ++ ":"
+      tgs = if not (null (tags issue))
+            then " :" <> T.intercalate ":" (tags issue) <> ":"
             else ""
-  in TextLine depth (prefix ++ " " ++ todo ++ " " ++ summ ++ tgs) fstLine
+  in TextLine depth (T.unpack (prefix <> " " <> todo <> " " <> summ <> tgs)) fstLine
 
 kIssueOrigin = "ISSUEORIGIN"
 kIssueNum = "ISSUENUM"
@@ -61,7 +63,7 @@ appendLines (Nothing:_) = Nothing
 appendLines (a:b:xs) = appendLines ((lineAdd a b):xs)
 appendLines [(Just a)] = Just a
 
-makeIssueOrgNode :: LineNumber -> Int -> Issue -> String
+makeIssueOrgNode :: LineNumber -> Int -> Issue -> Text
 makeIssueOrgNode fstLine depth issue =
   let indent = take depth $ repeat ' '
       heading = makeIssueOrgHeading fstLine depth issue
@@ -80,10 +82,10 @@ appendIssues file issues = do
   let headings = intercalate "\n" $ map (makeIssueOrgNode Nothing 2) issues
   appendFile file headings
 
-issueStatus :: IssueStatus -> String
+issueStatus :: IssueStatus -> Text
 issueStatus stat = map toUpper $ show stat
 
-statusIssue :: String -> Maybe IssueStatus
+statusIssue :: Text -> Maybe IssueStatus
 statusIssue s =
   case s of
     "ACTIVE" -> Just Active
@@ -161,7 +163,7 @@ makeIssueLine depth line_nr (IssueEvent when user details) =
     IssueMilestoneChange newms oldms ->
       [eventText $ "Milestone " ++ old ++ " -> " ++ new]
       where
-        fromMaybe :: String -> Maybe String -> String
+        fromMaybe :: Text -> Maybe Text -> Text
         fromMaybe s (Just t) = t
         fromMaybe s Nothing = s
         old = fromMaybe "(no prior milestone)" oldms
@@ -205,7 +207,7 @@ insertAtIndex c n lst@(x:xs)
   | n == 0 = c:lst
   | otherwise = lst ++ [c]
 
-summarizeChild :: NodeChild -> String
+summarizeChild :: NodeChild -> Text
 summarizeChild (ChildNode nd) = "Node: " ++ nTopic nd
 summarizeChild (ChildText tl) = "TextLine: pfx=" ++ (
   take 10 $ dropWhile isSpace $ tlText tl)
@@ -274,7 +276,7 @@ updateNodeIssue iss nd =
                                     (tags iss) ++ preseved_tags)) ++ ":"
                    else ""
 
-getOrgIssues :: String -> [Issue]
+getOrgIssues :: Text -> [Issue]
 getOrgIssues contents =
   let doc = orgFile contents
   in map fst $ ovElements $ generateDocView doc
